@@ -71,23 +71,62 @@ struct ImagePanel: View {
         .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
     }
 
+    // Info sourced from displayImage when showing output, from model when showing original.
+    private var currentInfo: PanelInfo {
+        if isOutput, let cg = displayImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
+            let csName: String = {
+                guard let cs = cg.colorSpace else { return "sRGB" }
+                if let name = cs.name { return (name as String).components(separatedBy: "/").last ?? (name as String) }
+                switch cs.model {
+                case .rgb: return "RGB"
+                case .cmyk: return "CMYK"
+                case .monochrome: return "Grayscale"
+                default: return "Unknown"
+                }
+            }()
+            let hasAlpha = cg.alphaInfo != .none && cg.alphaInfo != .noneSkipFirst && cg.alphaInfo != .noneSkipLast
+            let base = (model.filename as NSString).deletingPathExtension
+            return PanelInfo(
+                filename: "\(base)_output.png",
+                format: "PNG",
+                fileSize: "—",
+                dimensions: "\(cg.width) × \(cg.height) px",
+                dpi: "72 DPI",
+                colorSpace: csName,
+                bitDepth: "\(cg.bitsPerComponent) bpc · \(cg.bitsPerPixel) bpp",
+                hasAlpha: hasAlpha
+            )
+        }
+        return PanelInfo(
+            filename: model.filename,
+            format: model.format,
+            fileSize: model.fileSizeFormatted,
+            dimensions: model.dimensionsFormatted,
+            dpi: model.dpiFormatted,
+            colorSpace: model.colorSpace,
+            bitDepth: "\(model.bitsPerComponent) bpc · \(model.bitsPerPixel) bpp",
+            hasAlpha: model.hasAlpha
+        )
+    }
+
     private var infoTable: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            infoRow("Filename", model.filename)
+        let i = currentInfo
+        return VStack(alignment: .leading, spacing: 0) {
+            infoRow("Filename", i.filename)
             Divider().padding(.leading, 16)
-            infoRow("Format", model.format)
+            infoRow("Format", i.format)
             Divider().padding(.leading, 16)
-            infoRow("File Size", model.fileSizeFormatted)
+            infoRow("File Size", i.fileSize)
             Divider().padding(.leading, 16)
-            infoRow("Dimensions", model.dimensionsFormatted)
+            infoRow("Dimensions", i.dimensions)
             Divider().padding(.leading, 16)
-            infoRow("Resolution", model.dpiFormatted)
+            infoRow("Resolution", i.dpi)
             Divider().padding(.leading, 16)
-            infoRow("Color Space", model.colorSpace)
+            infoRow("Color Space", i.colorSpace)
             Divider().padding(.leading, 16)
-            infoRow("Bit Depth", "\(model.bitsPerComponent) bpc · \(model.bitsPerPixel) bpp")
+            infoRow("Bit Depth", i.bitDepth)
             Divider().padding(.leading, 16)
-            infoRow("Alpha Channel", model.hasAlpha ? "Yes" : "No")
+            infoRow("Alpha Channel", i.hasAlpha ? "Yes" : "No")
         }
         .padding(.vertical, 4)
     }
@@ -155,6 +194,17 @@ struct ImagePanel: View {
 }
 
 private enum ImageFormat { case png, jpeg }
+
+private struct PanelInfo {
+    var filename: String
+    var format: String
+    var fileSize: String
+    var dimensions: String
+    var dpi: String
+    var colorSpace: String
+    var bitDepth: String
+    var hasAlpha: Bool
+}
 
 extension NSImage {
     func pngData() -> Data? {
