@@ -2,6 +2,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    @EnvironmentObject var store: HeaderFooterStore
     @State private var model: ImageModel?
     @State private var outputImage: NSImage?
     @State private var isProcessing = false
@@ -16,6 +17,9 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.2), value: model != nil)
+        .onChange(of: store.layoutVersion) {
+            if let m = model { runProcessor(on: m) }
+        }
     }
 
     private var dropZone: some View {
@@ -115,8 +119,11 @@ struct ContentView: View {
     private func runProcessor(on m: ImageModel) {
         isProcessing = true
         outputImage = nil
+        // Capture current header/footer on the main thread before jumping to background.
+        let header = store.headerImage
+        let footer = store.footerImage
         DispatchQueue.global(qos: .userInitiated).async {
-            let result = processImage(m.nsImage)
+            let result = processImage(m.nsImage, header: header, footer: footer)
             DispatchQueue.main.async {
                 outputImage = result
                 isProcessing = false

@@ -3,8 +3,8 @@ import CoreGraphics
 import AppKit
 
 /// Detects comic panel squares, removes nested detections, sorts into reading order,
-/// then stacks the cropped panels in a vertical column.
-public func processImage(_ input: NSImage) -> NSImage {
+/// then stacks the cropped panels in a vertical column with optional header/footer images.
+public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSImage? = nil) -> NSImage {
     guard let cgInput = input.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         return input
     }
@@ -12,30 +12,42 @@ public func processImage(_ input: NSImage) -> NSImage {
     let imgWidth  = cgInput.width
     let imgHeight = cgInput.height
 
-    let raw     = detectSquares(in: cgInput)
-    let panels  = sortInReadingOrder(filterNested(raw))
+    let raw    = detectSquares(in: cgInput)
+    let panels = sortInReadingOrder(filterNested(raw))
 
     guard !panels.isEmpty else { return input }
 
     // Crop each panel using Vision's bounding box.
     // Vision: normalized coords, origin bottom-left.
     // CGImage.cropping: pixel coords, origin top-left → flip Y.
-    let crops: [CGImage] = panels.compactMap { obs in
+    let panelCrops: [CGImage] = panels.compactMap { obs in
         let box = obs.boundingBox
         let rect = CGRect(
-            x:      box.minX         * CGFloat(imgWidth),
-            y:      (1 - box.maxY)   * CGFloat(imgHeight),
-            width:  box.width        * CGFloat(imgWidth),
-            height: box.height       * CGFloat(imgHeight)
+            x:      box.minX       * CGFloat(imgWidth),
+            y:      (1 - box.maxY) * CGFloat(imgHeight),
+            width:  box.width      * CGFloat(imgWidth),
+            height: box.height     * CGFloat(imgHeight)
         )
         return cgInput.cropping(to: rect)
     }
 
-    guard !crops.isEmpty else { return input }
+    guard !panelCrops.isEmpty else { return input }
 
-    let padding      = 24
-    let outputWidth  = crops.map(\.width).max()!
-    let outputHeight = crops.map(\.height).reduce(0, +) + padding * (crops.count - 1)
+    let padding     = 24
+    let columnWidth = panelCrops.map(\.width).max()!
+
+    // Scale header/footer to column width if provided.
+    let headerCrop = header.flatMap { scaledToWidth($0, width: columnWidth) }
+    let footerCrop = footer.flatMap { scaledToWidth($0, width: columnWidth) }
+
+    // Build the full ordered list: header → panels → footer.
+    var allCrops: [CGImage] = []
+    if let h = headerCrop { allCrops.append(h) }
+    allCrops.append(contentsOf: panelCrops)
+    if let f = footerCrop { allCrops.append(f) }
+
+    let outputWidth  = allCrops.map(\.width).max()!
+    let outputHeight = allCrops.map(\.height).reduce(0, +) + padding * (allCrops.count - 1)
 
     guard let context = CGContext(
         data: nil,
@@ -50,9 +62,9 @@ public func processImage(_ input: NSImage) -> NSImage {
     context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
     context.fill(CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight))
 
-    // CGContext origin is bottom-left; draw panels top-to-bottom visually.
+    // CGContext origin is bottom-left; draw elements top-to-bottom visually.
     var bottomY = outputHeight
-    for crop in crops {
+    for crop in allCrops {
         bottomY -= crop.height
         let x = (outputWidth - crop.width) / 2
         context.draw(crop, in: CGRect(x: x, y: bottomY, width: crop.width, height: crop.height))
@@ -61,6 +73,26 @@ public func processImage(_ input: NSImage) -> NSImage {
 
     guard let result = context.makeImage() else { return input }
     return NSImage(cgImage: result, size: NSSize(width: outputWidth, height: outputHeight))
+}
+
+/// Scales an NSImage to exactly `width` pixels wide, maintaining aspect ratio.
+private func scaledToWidth(_ image: NSImage, width: Int) -> CGImage? {
+    guard let cg = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+    guard cg.width != width else { return cg }
+    let scale     = CGFloat(width) / CGFloat(cg.width)
+    let newHeight = max(1, Int(CGFloat(cg.height) * scale))
+    guard let ctx = CGContext(
+        data: nil,
+        width: width,
+        height: newHeight,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { return nil }
+    ctx.interpolationQuality = .high
+    ctx.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: newHeight))
+    return ctx.makeImage()
 }
 
 // MARK: - Detection

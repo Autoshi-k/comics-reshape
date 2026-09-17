@@ -2,6 +2,8 @@ import SwiftUI
 import AppKit
 
 struct ImagePanel: View {
+    @EnvironmentObject var store: HeaderFooterStore
+
     let label: String
     let model: ImageModel
     let displayImage: NSImage
@@ -10,19 +12,25 @@ struct ImagePanel: View {
     var onClear: (() -> Void)? = nil
 
     var body: some View {
-        VStack(spacing: 0) {
-            panelHeader
-            Divider()
-            imagePreview
-            Divider()
-            infoTable
-            if isOutput {
+        ScrollView {
+            VStack(spacing: 0) {
+                panelHeader
                 Divider()
-                downloadBar
+                imagePreview
+                Divider()
+                infoTable
+                if isOutput {
+                    Divider()
+                    headerFooterSection
+                    Divider()
+                    downloadBar
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    // MARK: - Header
 
     private var panelHeader: some View {
         HStack {
@@ -49,6 +57,8 @@ struct ImagePanel: View {
         .padding(.vertical, 10)
     }
 
+    // MARK: - Preview
+
     private var imagePreview: some View {
         ZStack {
             CheckerboardBackground()
@@ -71,7 +81,8 @@ struct ImagePanel: View {
         .background(Color(nsColor: .textBackgroundColor).opacity(0.3))
     }
 
-    // Info sourced from displayImage when showing output, from model when showing original.
+    // MARK: - Info table
+
     private var currentInfo: PanelInfo {
         if isOutput, let cg = displayImage.cgImage(forProposedRect: nil, context: nil, hints: nil) {
             let csName: String = {
@@ -148,6 +159,88 @@ struct ImagePanel: View {
         .padding(.vertical, 7)
     }
 
+    // MARK: - Header & Footer section
+
+    private var headerFooterSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Header & Footer")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 6)
+
+            slotRow(
+                label: "Header",
+                image: store.headerImage,
+                onSet: { pickImage { store.setHeader($0) } },
+                onRemove: { store.removeHeader() }
+            )
+            Divider().padding(.leading, 16)
+            slotRow(
+                label: "Footer",
+                image: store.footerImage,
+                onSet: { pickImage { store.setFooter($0) } },
+                onRemove: { store.removeFooter() }
+            )
+        }
+        .padding(.bottom, 4)
+    }
+
+    private func slotRow(label: String, image: NSImage?, onSet: @escaping () -> Void, onRemove: @escaping () -> Void) -> some View {
+        HStack(spacing: 10) {
+            Text(label)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(width: 50, alignment: .leading)
+
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 64, height: 38)
+                    .clipped()
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.3), lineWidth: 0.5))
+            } else {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.secondary.opacity(0.08))
+                    .frame(width: 64, height: 38)
+                    .overlay(
+                        Text("None")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    )
+            }
+
+            Spacer()
+
+            Button("Set…", action: onSet)
+                .controlSize(.small)
+                .buttonStyle(.bordered)
+
+            if image != nil {
+                Button("Remove", action: onRemove)
+                    .controlSize(.small)
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+    }
+
+    private func pickImage(then assign: @escaping (NSImage) -> Void) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url,
+              let image = NSImage(contentsOf: url) else { return }
+        assign(image)
+    }
+
+    // MARK: - Download bar
+
     private var downloadBar: some View {
         HStack {
             Spacer()
@@ -171,9 +264,8 @@ struct ImagePanel: View {
         panel.nameFieldStringValue = outputFilename(for: format)
         panel.allowedContentTypes = [format == .png ? .png : .jpeg]
         guard panel.runModal() == .OK, let url = panel.url else { return }
-
         let data: Data? = switch format {
-        case .png: displayImage.pngData()
+        case .png:  displayImage.pngData()
         case .jpeg: displayImage.jpegData(compressionQuality: 0.92)
         }
         guard let data else { return }
@@ -193,31 +285,13 @@ struct ImagePanel: View {
     }
 }
 
+// MARK: - Supporting types
+
 private enum ImageFormat { case png, jpeg }
 
 private struct PanelInfo {
-    var filename: String
-    var format: String
-    var fileSize: String
-    var dimensions: String
-    var dpi: String
-    var colorSpace: String
-    var bitDepth: String
+    var filename, format, fileSize, dimensions, dpi, colorSpace, bitDepth: String
     var hasAlpha: Bool
-}
-
-extension NSImage {
-    func pngData() -> Data? {
-        guard let cgImage = cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        return rep.representation(using: .png, properties: [:])
-    }
-
-    func jpegData(compressionQuality: Double) -> Data? {
-        guard let cgImage = cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
-        let rep = NSBitmapImageRep(cgImage: cgImage)
-        return rep.representation(using: .jpeg, properties: [.compressionFactor: compressionQuality])
-    }
 }
 
 private struct CheckerboardBackground: View {
