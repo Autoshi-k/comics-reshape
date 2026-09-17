@@ -294,24 +294,3 @@ private struct PanelInfo {
     var hasAlpha: Bool
 }
 
-private struct CheckerboardBackground: View {
-    var body: some View {
-        Canvas { ctx, size in
-            let tileSize: CGFloat = 10
-            var row = 0
-            var y: CGFloat = 0
-            while y < size.height {
-                var col = 0
-                var x: CGFloat = 0
-                while x < size.width {
-                    let color: Color = (row + col) % 2 == 0 ? .white : Color(white: 0.82)
-                    ctx.fill(Path(CGRect(x: x, y: y, width: tileSize, height: tileSize)), with: .color(color))
-                    x += tileSize
-                    col += 1
-                }
-                y += tileSize
-                row += 1
-            }
-        }
-    }
-}
