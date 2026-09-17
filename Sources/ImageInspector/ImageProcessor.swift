@@ -2,77 +2,86 @@ import Vision
 import CoreGraphics
 import AppKit
 
-/// Detects square shapes in the image and fills each detected square with solid black.
-/// Returns the modified image, or the original if no squares are found.
+/// Detects square shapes in the image, crops each one, and returns a new image
+/// with the squares stacked in a vertical column (top-to-bottom order) with padding between them.
+/// Returns the original image if no squares are found.
 public func processImage(_ input: NSImage) -> NSImage {
     guard let cgInput = input.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
         return input
     }
 
-    let width = cgInput.width
-    let height = cgInput.height
+    let imgWidth = cgInput.width
+    let imgHeight = cgInput.height
 
     let squares = detectSquares(in: cgInput)
-
     guard !squares.isEmpty else { return input }
+
+    // Sort top-to-bottom by vertical center in the original image.
+    // Vision Y=0 is bottom-left, so higher midY = higher on screen → comes first.
+    let sorted = squares.sorted { $0.boundingBox.midY > $1.boundingBox.midY }
+
+    // Crop each square from the original image.
+    // Vision bounding box: normalized, origin bottom-left.
+    // CGImage.cropping: pixel coords, origin top-left → flip Y.
+    let crops: [CGImage] = sorted.compactMap { obs in
+        let box = obs.boundingBox
+        let rect = CGRect(
+            x:      box.minX              * CGFloat(imgWidth),
+            y:      (1 - box.maxY)        * CGFloat(imgHeight),
+            width:  box.width             * CGFloat(imgWidth),
+            height: box.height            * CGFloat(imgHeight)
+        )
+        return cgInput.cropping(to: rect)
+    }
+
+    guard !crops.isEmpty else { return input }
+
+    let padding = 24
+    let outputWidth  = crops.map(\.width).max()!
+    let outputHeight = crops.map(\.height).reduce(0, +) + padding * (crops.count - 1)
 
     guard let context = CGContext(
         data: nil,
-        width: width,
-        height: height,
+        width: outputWidth,
+        height: outputHeight,
         bitsPerComponent: 8,
-        bytesPerRow: width * 4,
+        bytesPerRow: outputWidth * 4,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { return input }
 
-    // Draw original image as base
-    context.draw(cgInput, in: CGRect(x: 0, y: 0, width: width, height: height))
+    // White background
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight))
 
-    // Fill each detected square with black using its actual corner points
-    context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
-
-    for obs in squares {
-        // Vision coordinates: normalized, origin at bottom-left — same as CGContext
-        let tl = denormalize(obs.topLeft,     width: width, height: height)
-        let tr = denormalize(obs.topRight,    width: width, height: height)
-        let br = denormalize(obs.bottomRight, width: width, height: height)
-        let bl = denormalize(obs.bottomLeft,  width: width, height: height)
-
-        let path = CGMutablePath()
-        path.move(to: tl)
-        path.addLine(to: tr)
-        path.addLine(to: br)
-        path.addLine(to: bl)
-        path.closeSubpath()
-
-        context.addPath(path)
-        context.fillPath()
+    // Draw squares top-to-bottom.
+    // CGContext origin is bottom-left, so track offset from the bottom.
+    var bottomY = outputHeight
+    for crop in crops {
+        bottomY -= crop.height
+        let x = (outputWidth - crop.width) / 2  // center horizontally
+        context.draw(crop, in: CGRect(x: x, y: bottomY, width: crop.width, height: crop.height))
+        bottomY -= padding
     }
 
     guard let result = context.makeImage() else { return input }
-    return NSImage(cgImage: result, size: input.size)
+    let outputSize = NSSize(width: outputWidth, height: outputHeight)
+    return NSImage(cgImage: result, size: outputSize)
 }
 
 // MARK: - Private helpers
 
 private func detectSquares(in cgImage: CGImage) -> [VNRectangleObservation] {
     let request = VNDetectRectanglesRequest()
-    // Accept shapes whose shorter side is at least 75% of longer side (near-square)
     request.minimumAspectRatio = 0.75
     request.maximumAspectRatio = 1.0
-    // Ignore tiny shapes (less than 3% of image width/height)
     request.minimumSize = 0.03
     request.maximumObservations = 64
     request.minimumConfidence = 0.4
-    request.quadratureTolerance = 20  // degrees of allowed corner deviation from 90°
+    request.quadratureTolerance = 20
 
     let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
     try? handler.perform([request])
 
     return request.results ?? []
-}
-
-private func denormalize(_ point: CGPoint, width: Int, height: Int) -> CGPoint {
-    CGPoint(x: point.x * CGFloat(width), y: point.y * CGFloat(height))
 }
