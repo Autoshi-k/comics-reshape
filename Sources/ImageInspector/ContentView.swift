@@ -5,6 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var store: HeaderFooterStore
     @State private var model: ImageModel?
     @State private var outputImage: NSImage?
+    @State private var coverImage: NSImage?
     @State private var isProcessing = false
     @State private var isDragOver = false
 
@@ -168,6 +169,7 @@ struct ContentView: View {
                     Button {
                         self.model = nil
                         self.outputImage = nil
+                        self.coverImage = nil
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
@@ -298,9 +300,8 @@ struct ContentView: View {
             }
         }()
         let hasAlpha = cg.alphaInfo != .none && cg.alphaInfo != .noneSkipFirst && cg.alphaInfo != .noneSkipLast
-        let base = (sourceModel.filename as NSString).deletingPathExtension
         return [
-            ("Filename",      "\(base)_output.png"),
+            ("Filename",      coverImage == nil ? "comics.png" : "comics.png + cover.png"),
             ("Format",        "PNG"),
             ("File Size",     "—"),
             ("Dimensions",    "\(cg.width) × \(cg.height) px"),
@@ -313,15 +314,26 @@ struct ContentView: View {
 
     // MARK: - Download
 
+    /// Asks for a folder, then writes "comics" (the stacked output) and "cover" (the first panel) into it.
     private func saveOutput(as format: SaveFormat) {
-        guard let img = outputImage, let m = model else { return }
-        let panel = NSSavePanel()
-        let base = (m.filename as NSString).deletingPathExtension
-        panel.nameFieldStringValue = "\(base)_output.\(format == .png ? "png" : "jpg")"
-        panel.allowedContentTypes = [format == .png ? .png : .jpeg]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        let data: Data? = format == .png ? img.pngData() : img.jpegData(compressionQuality: 0.92)
-        try? data?.write(to: url)
+        guard let img = outputImage else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Save Here"
+        panel.message = "Choose a folder for comics and cover"
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+
+        let ext = format == .png ? "png" : "jpg"
+        func encode(_ image: NSImage) -> Data? {
+            format == .png ? image.pngData() : image.jpegData(compressionQuality: 0.92)
+        }
+        try? encode(img)?.write(to: folder.appendingPathComponent("comics.\(ext)"))
+        if let cover = coverImage {
+            try? encode(cover)?.write(to: folder.appendingPathComponent("cover.\(ext)"))
+        }
     }
 
     // MARK: - Image loading & processing
@@ -377,12 +389,14 @@ struct ContentView: View {
     private func runProcessor(on m: ImageModel) {
         isProcessing = true
         outputImage = nil
+        coverImage = nil
         let header = store.headerImage
         let footer = store.footerImage
         DispatchQueue.global(qos: .userInitiated).async {
             let result = processImage(m.nsImage, header: header, footer: footer)
             DispatchQueue.main.async {
-                outputImage = result
+                outputImage = result.comics
+                coverImage = result.cover
                 isProcessing = false
             }
         }

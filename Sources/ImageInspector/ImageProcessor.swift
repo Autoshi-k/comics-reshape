@@ -1,15 +1,23 @@
 import CoreGraphics
 import AppKit
 
+public struct ProcessedComic {
+    /// All panels stacked vertically, with optional header/footer.
+    public let comics: NSImage
+    /// The first panel in reading order, or nil if no panels were detected.
+    public let cover: NSImage?
+}
+
 /// Detects comic panels via white gutter bands, sorts into reading order,
 /// then stacks the cropped panels in a vertical column with optional header/footer.
-public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSImage? = nil) -> NSImage {
+public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSImage? = nil) -> ProcessedComic {
     guard let cgInput = input.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-        return input
+        return ProcessedComic(comics: input, cover: nil)
     }
 
     let panelCrops: [CGImage] = detectPanels(in: cgInput).compactMap { cgInput.cropping(to: $0) }
-    guard !panelCrops.isEmpty else { return input }
+    guard let firstPanel = panelCrops.first else { return ProcessedComic(comics: input, cover: nil) }
+    let cover = NSImage(cgImage: firstPanel, size: NSSize(width: firstPanel.width, height: firstPanel.height))
 
     let padding     = 24
     let columnWidth = panelCrops.map(\.width).max()!
@@ -33,7 +41,7 @@ public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSIma
         bytesPerRow: outputWidth * 4,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else { return input }
+    ) else { return ProcessedComic(comics: input, cover: cover) }
 
     context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
     context.fill(CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight))
@@ -46,24 +54,27 @@ public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSIma
         bottomY -= padding
     }
 
-    guard let result = context.makeImage() else { return input }
-    return NSImage(cgImage: result, size: NSSize(width: outputWidth, height: outputHeight))
+    guard let result = context.makeImage() else { return ProcessedComic(comics: input, cover: cover) }
+    return ProcessedComic(
+        comics: NSImage(cgImage: result, size: NSSize(width: outputWidth, height: outputHeight)),
+        cover: cover
+    )
 }
 
-// MARK: - Gutter-based panel detection
+// MARK: - Border-based panel detection
 
-/// Finds panels by locating horizontal and vertical white gutter bands.
-/// Returns rects in reading order (top-to-bottom, left-to-right).
-/// Rects are in CGImage coordinate space (y=0 at top-left).
+/// Finds panels as black-bordered boxes on a white page.
+/// The white page background is flood-filled inward from the image edges; panel interiors
+/// are walled off by their borders, so whatever they contain is never reached. Everything
+/// left over is grouped into connected blobs, and each large-enough blob's bounding box is a panel.
+/// Returns rects in reading order, in CGImage coordinates (y=0 at top).
 private func detectPanels(in image: CGImage) -> [CGRect] {
-    let width  = image.width
-    let height = image.height
+    // Analyse a downscaled copy of very large pages for speed; rects are scaled back up at the end.
+    let maxSide = 2000
+    let scale   = min(1.0, Double(maxSide) / Double(max(image.width, image.height)))
+    let width   = max(1, Int((Double(image.width)  * scale).rounded()))
+    let height  = max(1, Int((Double(image.height) * scale).rounded()))
 
-    // Render into a pixel buffer without any transform.
-    // In a macOS CGContext, the default coordinate system has y=0 at the bottom,
-    // so a CGImage (whose y=0 is at the top) is rendered upside-down in memory —
-    // meaning buffer row 0 = BOTTOM of image, buffer row (height-1) = TOP of image.
-    // We handle this by reversing hRanges and converting y-coordinates explicitly.
     guard let ctx = CGContext(
         data: nil,
         width: width, height: height,
@@ -71,115 +82,101 @@ private func detectPanels(in image: CGImage) -> [CGRect] {
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
     ) else { return [] }
+    // Transparent areas count as white page, not black.
+    ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    ctx.interpolationQuality = .medium
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
     guard let data = ctx.data else { return [] }
 
-    let pixels = data.bindMemory(to: UInt8.self, capacity: width * height * 4)
-    let bytesPerRow = ctx.bytesPerRow   // use actual stride, not assumed width * 4
+    // Buffer row 0 is the TOP of the image, so buffer coordinates match CGImage coordinates.
+    let pixels      = data.bindMemory(to: UInt8.self, capacity: ctx.bytesPerRow * height)
+    let bytesPerRow = ctx.bytesPerRow
+    let count       = width * height
 
-    let pixelThreshold   = 0.85   // pixel is "white" if average brightness exceeds this
-    let whiteRowFraction = 0.88   // row/col is a gutter candidate if this fraction is white
-    let darkPixelCutoff  = 0.15   // pixel is "very dark" (black border) if below this
-    let darkRowFraction  = 0.40   // row/col has a border if 40%+ pixels are very dark
-    let minGutterPixels  = 8      // ignore white bands thinner than this
-    let borderWindow     = 25     // pixels to look before/after a white band for dark borders
-    let minPanelPixels   = min(width, height) / 8
+    // Per-pixel state. Raw buffers keep the fills fast even in unoptimized debug builds.
+    let ink: UInt8 = 0, white: UInt8 = 1, claimed: UInt8 = 2   // claimed = page background or already in a blob
+    let state = UnsafeMutablePointer<UInt8>.allocate(capacity: count)
+    let stack = UnsafeMutablePointer<Int>.allocate(capacity: count)   // a pixel is pushed at most once
+    defer { state.deallocate(); stack.deallocate() }
+    var top = 0
 
-    // --- Per-row whiteness + darkness ---
-    var rowWhiteness = [Double](repeating: 0, count: height)
-    var rowDarkness  = [Double](repeating: 0, count: height)
+    let whiteThreshold = Int(0.80 * 3 * 255)   // pixel is page-white if R+G+B is above this
     for y in 0..<height {
-        var white = 0, dark = 0
         for x in 0..<width {
             let i = y * bytesPerRow + x * 4
-            let b = (Double(pixels[i]) + Double(pixels[i+1]) + Double(pixels[i+2])) / (3 * 255)
-            if b > pixelThreshold  { white += 1 }
-            if b < darkPixelCutoff { dark  += 1 }
-        }
-        rowWhiteness[y] = Double(white) / Double(width)
-        rowDarkness[y]  = Double(dark)  / Double(width)
-    }
-
-    // --- Per-column whiteness + darkness ---
-    var colWhiteness = [Double](repeating: 0, count: width)
-    var colDarkness  = [Double](repeating: 0, count: width)
-    for x in 0..<width {
-        var white = 0, dark = 0
-        for y in 0..<height {
-            let i = y * bytesPerRow + x * 4
-            let b = (Double(pixels[i]) + Double(pixels[i+1]) + Double(pixels[i+2])) / (3 * 255)
-            if b > pixelThreshold  { white += 1 }
-            if b < darkPixelCutoff { dark  += 1 }
-        }
-        colWhiteness[x] = Double(white) / Double(height)
-        colDarkness[x]  = Double(dark)  / Double(height)
-    }
-
-    // Candidate white bands → keep only those flanked by dark (border) rows or image edge.
-    // This rejects bright content areas (e.g. moon landscape) which have no black border next to them.
-    let candidateHBands = gutterBands(in: rowWhiteness, threshold: whiteRowFraction, minThickness: minGutterPixels)
-    let hGutterBands = candidateHBands.filter { (start, end) in
-        let prevRange = max(0, start - borderWindow)..<start
-        let nextRange = end..<min(height, end + borderWindow)
-        let prevDark = start == 0 || prevRange.contains { rowDarkness[$0] >= darkRowFraction }
-        let nextDark = end == height || nextRange.contains { rowDarkness[$0] >= darkRowFraction }
-        return prevDark && nextDark
-    }
-
-    let candidateVBands = gutterBands(in: colWhiteness, threshold: whiteRowFraction, minThickness: minGutterPixels)
-    let vGutterBands = candidateVBands.filter { (start, end) in
-        let prevRange = max(0, start - borderWindow)..<start
-        let nextRange = end..<min(width, end + borderWindow)
-        let prevDark = start == 0 || prevRange.contains { colDarkness[$0] >= darkRowFraction }
-        let nextDark = end == width || nextRange.contains { colDarkness[$0] >= darkRowFraction }
-        return prevDark && nextDark
-    }
-
-    // Panel regions sit between gutter bands.
-    let hRanges = regions(between: hGutterBands, total: height).filter { $0.1 - $0.0 >= minPanelPixels }
-    let vRanges = regions(between: vGutterBands, total: width).filter  { $0.1 - $0.0 >= minPanelPixels }
-
-    // hRanges are in buffer order (bottom→top of image). Reversing gives top→bottom (reading order).
-    // Convert buffer y-coords to CGImage coords (y=0 at top): cgY = height - bufferEnd.
-    var panels: [CGRect] = []
-    for (rowStart, rowEnd) in hRanges.reversed() {
-        let cgY = height - rowEnd
-        let rowH = rowEnd - rowStart
-        for (colStart, colEnd) in vRanges {
-            panels.append(CGRect(x: colStart, y: cgY, width: colEnd - colStart, height: rowH))
+            state[y * width + x] = Int(pixels[i]) + Int(pixels[i+1]) + Int(pixels[i+2]) > whiteThreshold ? white : ink
         }
     }
-    return panels
+
+    // 1. Flood-fill the white page background, starting from every white pixel on the image edge.
+    var edge: [Int] = []
+    for x in 0..<width  { edge.append(x); edge.append((height - 1) * width + x) }
+    for y in 0..<height { edge.append(y * width); edge.append(y * width + width - 1) }
+    for i in edge where state[i] == white { state[i] = claimed; stack[top] = i; top += 1 }
+    while top > 0 {
+        top -= 1
+        let i = stack[top], x = i % width, y = i / width
+        if x > 0,          state[i - 1] == white     { state[i - 1] = claimed;     stack[top] = i - 1;     top += 1 }
+        if x < width - 1,  state[i + 1] == white     { state[i + 1] = claimed;     stack[top] = i + 1;     top += 1 }
+        if y > 0,          state[i - width] == white { state[i - width] = claimed; stack[top] = i - width; top += 1 }
+        if y < height - 1, state[i + width] == white { state[i + width] = claimed; stack[top] = i + width; top += 1 }
+    }
+
+    // 2. Group the remaining pixels (borders + panel contents) into 8-connected blobs.
+    var boxes: [CGRect] = []
+    for start in 0..<count where state[start] != claimed {
+        var minX = width, minY = height, maxX = 0, maxY = 0
+        state[start] = claimed; stack[top] = start; top += 1
+        while top > 0 {
+            top -= 1
+            let i = stack[top], x = i % width, y = i / width
+            if x < minX { minX = x }; if x > maxX { maxX = x }
+            if y < minY { minY = y }; if y > maxY { maxY = y }
+            // Unrolled 8-neighbour visit (range loops are very slow in debug builds).
+            let l = x > 0, r = x < width - 1, u = y > 0, d = y < height - 1
+            if l      { let n = i - 1;         if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if r      { let n = i + 1;         if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if u      { let n = i - width;     if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if d      { let n = i + width;     if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if u && l { let n = i - width - 1; if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if u && r { let n = i - width + 1; if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if d && l { let n = i + width - 1; if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+            if d && r { let n = i + width + 1; if state[n] != claimed { state[n] = claimed; stack[top] = n; top += 1 } }
+        }
+        boxes.append(CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1))
+    }
+
+    // 3. Drop small blobs (page numbers, stray marks) and boxes nested inside another box.
+    let minPanelPixels = CGFloat(min(width, height)) / 12
+    let large = boxes.filter { $0.width >= minPanelPixels && $0.height >= minPanelPixels }
+    let panels = large.filter { box in !large.contains { $0 != box && $0.contains(box) } }
+
+    // Scale back to full-resolution coordinates, padding by one source pixel to keep the border intact.
+    let pad    = ceil(1 / scale)
+    let bounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+    let fullRes = panels.map { box in
+        CGRect(x: box.minX / scale, y: box.minY / scale, width: box.width / scale, height: box.height / scale)
+            .insetBy(dx: -pad, dy: -pad)
+            .integral
+            .intersection(bounds)
+    }
+    return sortedInReadingOrder(fullRes)
 }
 
-/// Finds contiguous runs of values >= threshold that are at least minThickness wide.
-private func gutterBands(in values: [Double], threshold: Double, minThickness: Int) -> [(Int, Int)] {
-    var bands: [(Int, Int)] = []
-    var start: Int? = nil
-    for i in 0..<values.count {
-        if values[i] >= threshold {
-            if start == nil { start = i }
-        } else if let s = start {
-            if i - s >= minThickness { bands.append((s, i)) }
-            start = nil
+/// Orders panels row by row (top to bottom), left to right within a row.
+/// A panel joins the current row if it starts above the bottom of every panel already in it,
+/// so a tall panel spanning two rows is read before the stacked panels beside it.
+private func sortedInReadingOrder(_ rects: [CGRect]) -> [CGRect] {
+    var rows: [[CGRect]] = []
+    for rect in rects.sorted(by: { $0.minY < $1.minY }) {
+        if let row = rows.last, rect.minY < row.map(\.maxY).min()! {
+            rows[rows.count - 1].append(rect)
+        } else {
+            rows.append([rect])
         }
     }
-    if let s = start, values.count - s >= minThickness {
-        bands.append((s, values.count))
-    }
-    return bands
-}
-
-/// Returns the gaps between gutter bands — these are the panel regions.
-private func regions(between gutters: [(Int, Int)], total: Int) -> [(Int, Int)] {
-    var ranges: [(Int, Int)] = []
-    var cursor = 0
-    for (start, end) in gutters {
-        if start > cursor { ranges.append((cursor, start)) }
-        cursor = end
-    }
-    if cursor < total { ranges.append((cursor, total)) }
-    return ranges
+    return rows.flatMap { $0.sorted { $0.minX < $1.minX } }
 }
 
 // MARK: - Scaling
