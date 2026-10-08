@@ -24,6 +24,23 @@ rm -rf "$APP" "$ZIP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/$EXECUTABLE" "$APP/Contents/MacOS/$EXECUTABLE"
 
+ICON_SRC="$ROOT/assets/icon.png"
+if [ -f "$ICON_SRC" ]; then
+    echo "→ Generating app icon…"
+    TMP="$(mktemp -d)"
+    trap 'rm -rf "$TMP"' EXIT
+    swift "$ROOT/scripts/make-icon.swift" "$ICON_SRC" "$TMP/icon.png"
+    ICONSET="$TMP/AppIcon.iconset"
+    mkdir "$ICONSET"
+    for size in 16 32 128 256 512; do
+        sips -z $size $size             "$TMP/icon.png" --out "$ICONSET/icon_${size}x${size}.png"    >/dev/null
+        sips -z $((size*2)) $((size*2)) "$TMP/icon.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+else
+    echo "→ No assets/icon.png found, building without an icon."
+fi
+
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,6 +50,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleDisplayName</key>         <string>$APP_NAME</string>
     <key>CFBundleIdentifier</key>          <string>$BUNDLE_ID</string>
     <key>CFBundleExecutable</key>          <string>$EXECUTABLE</string>
+    <key>CFBundleIconFile</key>            <string>AppIcon</string>
     <key>CFBundlePackageType</key>         <string>APPL</string>
     <key>CFBundleShortVersionString</key>  <string>$VERSION</string>
     <key>CFBundleVersion</key>             <string>$VERSION</string>
