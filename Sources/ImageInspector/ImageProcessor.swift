@@ -4,20 +4,20 @@ import AppKit
 public struct ProcessedComic {
     /// All panels stacked vertically, with optional header/footer.
     public let comics: NSImage
-    /// The first panel in reading order, or nil if no panels were detected.
-    public let cover: NSImage?
+    /// Each detected panel on its own, in reading order (empty if no panels were detected).
+    public let panels: [NSImage]
 }
 
 /// Detects comic panels via white gutter bands, sorts into reading order,
 /// then stacks the cropped panels in a vertical column with optional header/footer.
 public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSImage? = nil) -> ProcessedComic {
     guard let cgInput = input.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-        return ProcessedComic(comics: input, cover: nil)
+        return ProcessedComic(comics: input, panels: [])
     }
 
     let panelCrops: [CGImage] = detectPanels(in: cgInput).compactMap { cgInput.cropping(to: $0) }
-    guard let firstPanel = panelCrops.first else { return ProcessedComic(comics: input, cover: nil) }
-    let cover = NSImage(cgImage: firstPanel, size: NSSize(width: firstPanel.width, height: firstPanel.height))
+    guard !panelCrops.isEmpty else { return ProcessedComic(comics: input, panels: []) }
+    let panels = panelCrops.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
 
     let padding     = 24
     let columnWidth = panelCrops.map(\.width).max()!
@@ -41,7 +41,7 @@ public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSIma
         bytesPerRow: outputWidth * 4,
         space: CGColorSpaceCreateDeviceRGB(),
         bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-    ) else { return ProcessedComic(comics: input, cover: cover) }
+    ) else { return ProcessedComic(comics: input, panels: panels) }
 
     context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
     context.fill(CGRect(x: 0, y: 0, width: outputWidth, height: outputHeight))
@@ -54,10 +54,10 @@ public func processImage(_ input: NSImage, header: NSImage? = nil, footer: NSIma
         bottomY -= padding
     }
 
-    guard let result = context.makeImage() else { return ProcessedComic(comics: input, cover: cover) }
+    guard let result = context.makeImage() else { return ProcessedComic(comics: input, panels: panels) }
     return ProcessedComic(
         comics: NSImage(cgImage: result, size: NSSize(width: outputWidth, height: outputHeight)),
-        cover: cover
+        panels: panels
     )
 }
 

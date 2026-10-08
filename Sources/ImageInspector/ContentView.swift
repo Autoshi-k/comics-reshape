@@ -5,7 +5,7 @@ struct ContentView: View {
     @EnvironmentObject var store: HeaderFooterStore
     @State private var model: ImageModel?
     @State private var outputImage: NSImage?
-    @State private var coverImage: NSImage?
+    @State private var panelImages: [NSImage] = []
     @State private var isProcessing = false
     @State private var isDragOver = false
 
@@ -169,7 +169,7 @@ struct ContentView: View {
                     Button {
                         self.model = nil
                         self.outputImage = nil
-                        self.coverImage = nil
+                        self.panelImages = []
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(.secondary)
@@ -301,7 +301,7 @@ struct ContentView: View {
         }()
         let hasAlpha = cg.alphaInfo != .none && cg.alphaInfo != .noneSkipFirst && cg.alphaInfo != .noneSkipLast
         return [
-            ("Filename",      coverImage == nil ? "comics.png" : "comics.png + cover.png"),
+            ("Filename",      panelImages.isEmpty ? "comics.png" : "comics.png + \(panelImages.count) panels (1–\(panelImages.count))"),
             ("Format",        "PNG"),
             ("File Size",     "—"),
             ("Dimensions",    "\(cg.width) × \(cg.height) px"),
@@ -314,7 +314,7 @@ struct ContentView: View {
 
     // MARK: - Download
 
-    /// Asks for a folder, then writes "comics" (the stacked output) and "cover" (the first panel) into it.
+    /// Asks for a folder, then writes "comics" (the stacked output) plus each panel as "1", "2", … in reading order.
     private func saveOutput(as format: SaveFormat) {
         guard let img = outputImage else { return }
         let panel = NSOpenPanel()
@@ -323,7 +323,7 @@ struct ContentView: View {
         panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "Save Here"
-        panel.message = "Choose a folder for comics and cover"
+        panel.message = "Choose a folder for the comics and its panels"
         guard panel.runModal() == .OK, let folder = panel.url else { return }
 
         let ext = format == .png ? "png" : "jpg"
@@ -331,8 +331,8 @@ struct ContentView: View {
             format == .png ? image.pngData() : image.jpegData(compressionQuality: 0.92)
         }
         try? encode(img)?.write(to: folder.appendingPathComponent("comics.\(ext)"))
-        if let cover = coverImage {
-            try? encode(cover)?.write(to: folder.appendingPathComponent("cover.\(ext)"))
+        for (index, panelImage) in panelImages.enumerated() {
+            try? encode(panelImage)?.write(to: folder.appendingPathComponent("\(index + 1).\(ext)"))
         }
     }
 
@@ -389,14 +389,14 @@ struct ContentView: View {
     private func runProcessor(on m: ImageModel) {
         isProcessing = true
         outputImage = nil
-        coverImage = nil
+        panelImages = []
         let header = store.headerImage
         let footer = store.footerImage
         DispatchQueue.global(qos: .userInitiated).async {
             let result = processImage(m.nsImage, header: header, footer: footer)
             DispatchQueue.main.async {
                 outputImage = result.comics
-                coverImage = result.cover
+                panelImages = result.panels
                 isProcessing = false
             }
         }
